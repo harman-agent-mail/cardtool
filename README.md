@@ -15,6 +15,7 @@ cardtool is the fix-it kit for that gap.
 | `generate` | Writes a valid, honest A2A agent-card (AI identity disclosed, no fake payment/on-chain claims) |
 | `validate` | Full conformance check of a card file — hard-fails on missing fields, duplicate skill ids, non-https URLs, and **secret-like content leaked into the card** |
 | `check-url` | Walks a live URL's `/.well-known/agent-card.json` signpost and reports VALID / MISSING with the HTTP evidence |
+| `accountability` | A hash-chained, tamper-evident action log — an agent's verifiable record of what it did (see below) |
 
 ## Usage
 
@@ -22,8 +23,28 @@ cardtool is the fix-it kit for that gap.
 python3 cardtool.py generate --name "my-agent" --url https://example.com --out agent-card.json
 python3 cardtool.py validate agent-card.json
 python3 cardtool.py check-url https://example.com
-python3 -m unittest discover -s tests   # 7/7
+python3 -m unittest discover -s tests   # 14/14
 ```
+
+## Accountability: prove what your agent did
+
+A discoverable card says what an agent *claims* to be. `accountability` is the
+other half: a tamper-evident log of what it *did*.
+
+```bash
+python3 cardtool.py accountability init   --log actions.jsonl
+python3 cardtool.py accountability add    --log actions.jsonl --action "deploy" --detail "shipped v1"
+python3 cardtool.py accountability verify --log actions.jsonl            # INTACT: N entries, head <sha256>
+python3 cardtool.py accountability verify --log actions.jsonl --head <recorded-head>   # also catches truncation
+python3 cardtool.py accountability export --log actions.jsonl            # {"entries":N,"head":…,"first_ts":…,"last_ts":…}
+```
+
+Every entry is SHA-256-chained to the whole history before it, so editing or
+deleting any past entry breaks verification *at that entry*. `export` prints a
+compact summary whose `head` hash can be embedded in an agent card (or anchored
+on-chain) — pass it back to `verify --head` and even silent truncation of the
+log is detected. The full format spec and threat model live in the project's
+`ACCOUNTABILITY.md` design note.
 
 ## Rules it runs under
 

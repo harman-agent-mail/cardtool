@@ -185,15 +185,170 @@ def cmd_check_url(args):
     for w in warnings: print(f"  warning: {w}")
     return 0 if ok else 1
 
+# --- accountability: hash-chained, tamper-evident action log ----------------
+# An agent claiming to be trustworthy should be able to prove what it did.
+# `accountability` gives it an append-only action log (JSONL) where every
+# entry commits to the entire history before it:
+#   hash = sha256(canonical({seq, ts, action, detail, prev}))
+#   prev = the previous entry's hash; the genesis entry's prev is 64 zeros.
+# Editing or deleting any past entry breaks the chain at that entry and
+# `verify` names it. Tail truncation is NOT detectable from the file alone
+# (a shortened chain is still a valid chain) — record the head hash somewhere
+# external (`export` prints it; embed it in an agent card) and pass it back
+# as `verify --head <hash>` to anchor the log's length. See ACCOUNTABILITY.md.
+ACCT_GENESIS_PREV = "0" * 64
+ACCT_FORMAT = "cardtool-accountability/1"
+
+def _acct_hash(seq, ts, action, detail, prev):
+    body = {"seq": seq, "ts": ts, "action": action, "detail": detail, "prev": prev}
+    canon = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canon.encode()).hexdigest()
+
+def _acct_line(entry):
+    return json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+def _acct_read(path):
+    """Return (entries, error). Entries are dicts in file order."""
+    p = Path(path)
+    if not p.exists():
+        return None, f"log not found: {p}"
+    lines = [l for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+    if not lines:
+        return None, f"log is empty: {p}"
+    entries = []
+    for i, line in enumerate(lines):
+        try:
+            e = json.loads(line)
+        except Exception as ex:
+            return None, f"line {i + 1}: invalid JSON ({ex})"
+        if not isinstance(e, dict):
+            return None, f"line {i + 1}: entry is not a JSON object"
+        entries.append(e)
+    return entries, None
+
+def _acct_check(entries):
+    """Recompute the chain. Return (ok, first_bad_index, reason)."""
+    for i, e in enumerate(entries):
+        for f in ("seq", "ts", "action", "detail", "prev", "hash"):
+            if f not in e:
+                return False, i, f"missing field: {f}"
+        if e["seq"] != i:
+            return False, i, (f"sequence mismatch: entry claims seq {e['seq']}, expected {i} "
+                              "(an entry was deleted, inserted or reordered)")
+        expected_prev = ACCT_GENESIS_PREV if i == 0 else entries[i - 1]["hash"]
+        if e["prev"] != expected_prev:
+            return False, i, "prev link mismatch: does not point at the previous entry's hash"
+        if _acct_hash(e["seq"], e["ts"], e["action"], e["detail"], e["prev"]) != e["hash"]:
+            return False, i, "hash mismatch: entry content was altered after it was written"
+    return True, None, ""
+
+def cmd_acct_init(args):
+    p = Path(args.log)
+    if p.exists():
+        audit("accountability:init", p, False, b"", [f"log already exists: {p}"])
+        print(f"REFUSING: log already exists: {p} (will not overwrite an action history)")
+        return 1
+    entry = {"seq": 0, "ts": now_iso(), "action": "genesis",
+             "detail": "cardtool accountability log created", "prev": ACCT_GENESIS_PREV}
+    entry["hash"] = _acct_hash(entry["seq"], entry["ts"], entry["action"], entry["detail"], entry["prev"])
+    data = (_acct_line(entry) + "\n").encode()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(data)
+    audit("accountability:init", p, True, data)
+    print(f"created accountability log {p}")
+    print(f"  genesis hash {entry['hash']}")
+    return 0
+
+def cmd_acct_add(args):
+    p = Path(args.log)
+    entries, err = _acct_read(p)
+    if err:
+        audit("accountability:add", p, False, b"", [err])
+        print(f"CANNOT ADD: {err}")
+        return 1
+    ok, bad, reason = _acct_check(entries)
+    if not ok:
+        audit("accountability:add", p, False, p.read_bytes(), [f"existing log broken at entry {bad}: {reason}"])
+        print(f"CANNOT ADD: existing log is broken at entry {bad}: {reason} — refusing to extend a broken chain")
+        return 1
+    last = entries[-1]
+    entry = {"seq": last["seq"] + 1, "ts": now_iso(), "action": args.action,
+             "detail": args.detail, "prev": last["hash"]}
+    entry["hash"] = _acct_hash(entry["seq"], entry["ts"], entry["action"], entry["detail"], entry["prev"])
+    with p.open("a", encoding="utf-8") as f:
+        f.write(_acct_line(entry) + "\n")
+    audit("accountability:add", p, True, p.read_bytes())
+    print(f"appended seq {entry['seq']} action={args.action!r} hash {entry['hash']}")
+    return 0
+
+def cmd_acct_verify(args):
+    p = Path(args.log)
+    data = p.read_bytes() if p.exists() else b""
+    entries, err = _acct_read(p)
+    if err:
+        audit("accountability:verify", p, False, data, [err])
+        print(f"BROKEN: {err}")
+        return 1
+    ok, bad, reason = _acct_check(entries)
+    if not ok:
+        audit("accountability:verify", p, False, data, [f"entry {bad}: {reason}"])
+        print(f"BROKEN at entry {bad} (line {bad + 1}): {reason}")
+        return 1
+    head = entries[-1]["hash"]
+    want_head = getattr(args, "head", None)
+    if want_head and want_head != head:
+        audit("accountability:verify", p, False, data, ["head mismatch vs recorded head"])
+        print(f"BROKEN: head mismatch — recorded head {want_head}, actual head {head} "
+              "(log was truncated or extended after the head was recorded)")
+        return 1
+    audit("accountability:verify", p, True, data)
+    print(f"INTACT: {len(entries)} entries, head {head}")
+    print(f"  first: {entries[0]['ts']} ({entries[0]['action']})")
+    print(f"  last:  {entries[-1]['ts']} ({entries[-1]['action']})")
+    return 0
+
+def cmd_acct_export(args):
+    p = Path(args.log)
+    data = p.read_bytes() if p.exists() else b""
+    entries, err = _acct_read(p)
+    if err:
+        audit("accountability:export", p, False, data, [err])
+        print(f"CANNOT EXPORT: {err}")
+        return 1
+    ok, bad, reason = _acct_check(entries)
+    if not ok:
+        audit("accountability:export", p, False, data, [f"entry {bad}: {reason}"])
+        print(f"CANNOT EXPORT: log is broken at entry {bad}: {reason}")
+        return 1
+    summary = {"format": ACCT_FORMAT, "entries": len(entries), "head": entries[-1]["hash"],
+               "first_ts": entries[0]["ts"], "last_ts": entries[-1]["ts"]}
+    line = json.dumps(summary, sort_keys=True, separators=(",", ":"))
+    audit("accountability:export", p, True, line.encode())
+    print(line)
+    return 0
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="cardtool", description="A2A agent-card generator/validator/signpost checker")
     sub = ap.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("generate"); g.add_argument("--out", required=True); g.set_defaults(fn=cmd_generate)
     v = sub.add_parser("validate"); v.add_argument("file"); v.set_defaults(fn=cmd_validate)
     c = sub.add_parser("check-url"); c.add_argument("url"); c.set_defaults(fn=cmd_check_url)
+    a = sub.add_parser("accountability", help="hash-chained tamper-evident action log")
+    asub = a.add_subparsers(dest="acct_cmd", required=True)
+    ai = asub.add_parser("init", help="create an empty hash-chained log (genesis entry)")
+    ai.add_argument("--log", required=True); ai.set_defaults(fn=cmd_acct_init, cmd_label="accountability:init")
+    aa = asub.add_parser("add", help="append an action entry to the chain")
+    aa.add_argument("--log", required=True); aa.add_argument("--action", required=True); aa.add_argument("--detail", required=True)
+    aa.set_defaults(fn=cmd_acct_add, cmd_label="accountability:add")
+    av = asub.add_parser("verify", help="recompute the whole chain; exit 0 only if intact")
+    av.add_argument("--log", required=True); av.add_argument("--head", default=None,
+                    help="expected head hash (from export); a mismatch means the log was truncated or extended")
+    av.set_defaults(fn=cmd_acct_verify, cmd_label="accountability:verify")
+    ae = asub.add_parser("export", help="print a compact summary (entries, head, first/last ts) for embedding")
+    ae.add_argument("--log", required=True); ae.set_defaults(fn=cmd_acct_export, cmd_label="accountability:export")
     args = ap.parse_args(argv)
     if paused():
-        audit(args.cmd, "PAUSED", False, b"", ["global pause active: ~/workspace/jarvis-lab/PAUSE exists"])
+        audit(getattr(args, "cmd_label", args.cmd), "PAUSED", False, b"", ["global pause active: ~/workspace/jarvis-lab/PAUSE exists"])
         print("PAUSED: ~/workspace/jarvis-lab/PAUSE exists — doing nothing. Remove that file to resume.")
         return 2
     return args.fn(args)
