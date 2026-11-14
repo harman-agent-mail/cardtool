@@ -14,16 +14,16 @@ cardtool is the fix-it kit for that gap.
 |---|---|
 | `generate` | Writes a valid, honest A2A agent-card (AI identity disclosed, no fake payment/on-chain claims) |
 | `validate` | Full conformance check of a card file — hard-fails on missing fields, duplicate skill ids, non-https URLs, and **secret-like content leaked into the card** |
-| `check-url` | Walks a live URL's `/.well-known/agent-card.json` signpost and reports VALID / MISSING with the HTTP evidence |
+| `check-url` | Walks a live URL's `/.well-known/agent-card.json` signpost and reports VALID / MISSING — plus **GATED**: on HTTP 401/403 it retries once with a browser user-agent, and a valid card that only answers that retry is reported as `SIGNPOST GATED (valid card, refuses plain clients)`, distinct from both VALID and MISSING |
 | `accountability` | A hash-chained, tamper-evident action log — an agent's verifiable record of what it did (see below) |
 
 ## Usage
 
 ```bash
-python3 cardtool.py generate --name "my-agent" --url https://example.com --out agent-card.json
+python3 cardtool.py generate --out agent-card.json
 python3 cardtool.py validate agent-card.json
 python3 cardtool.py check-url https://example.com
-python3 -m unittest discover -s tests   # 14/14
+python3 -m unittest discover -s tests   # 22/22 (incl. 8 GATED-verdict tests)
 ```
 
 ## Accountability: prove what your agent did

@@ -18,9 +18,15 @@ Runtime rules baked in, not just documented:
 - NO SECRETS: the validator fails any card whose text contains private-key /
   seed / password patterns.
 """
-import argparse, hashlib, json, re, sys, urllib.request
+import argparse, hashlib, json, re, sys, urllib.error, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+__version__ = "0.2.0"
+# v0.2: check-url gains a GATED verdict — a valid card that refuses plain
+# automated clients (HTTP 401/403) but answers a browser user-agent.
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
 LAB = Path.home() / "workspace" / "jarvis-lab"
 PAUSE_FILE = LAB / "PAUSE"
@@ -160,18 +166,16 @@ def cmd_validate(args):
     for w in warnings: print(f"  warning: {w}")
     return 0 if ok else 1
 
-def cmd_check_url(args):
-    url = args.url
-    if not url.endswith("agent-card.json"):
-        url = url.rstrip("/") + "/.well-known/agent-card.json"
-    try:
-        with urllib.request.urlopen(url, timeout=15) as r:
-            data = r.read()
-            status = r.status
-    except Exception as e:
-        audit("check-url", url, False, b"", [str(e)])
-        print(f"SIGNPOST MISSING/UNREACHABLE: {url} ({e})")
-        return 1
+def _fetch(url, headers=None):
+    """One GET. Returns (status, body bytes). Raises on HTTP errors
+    (urllib.error.HTTPError carries .code) and transport failures."""
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return r.status, r.read()
+
+def _report_plain(url, status, data):
+    """Verdict for a card fetched by the plain client (unchanged v0.1
+    behaviour): VALID / PRESENT-BUT-INVALID / PRESENT-but-not-JSON."""
     try:
         card = json.loads(data)
     except Exception as e:
@@ -184,6 +188,55 @@ def cmd_check_url(args):
     for e in errors: print(f"  error: {e}")
     for w in warnings: print(f"  warning: {w}")
     return 0 if ok else 1
+
+def _report_gated(url, status, data):
+    """Verdict for the browser-UA retry after a plain-client 401/403.
+    GATED is distinct from VALID (plain discovery failed) and from MISSING
+    (a card exists and is reachable). Exit 1: not walkable by a plain client.
+    A valid gated card is still a discovery failure in practice."""
+    try:
+        card = json.loads(data)
+    except Exception as e:
+        audit("check-url", url, False, data, [str(e), "gated: browser-UA retry returned non-JSON"])
+        print(f"SIGNPOST GATED (non-JSON response, refuses plain clients) (HTTP {status} with browser UA): {url}")
+        return 1
+    ok, errors, warnings = validate(card)
+    audit("check-url", url, ok, data, errors)
+    if ok:
+        print(f"SIGNPOST GATED (valid card, refuses plain clients) (HTTP {status} with browser UA): {url}")
+    else:
+        print(f"SIGNPOST GATED (invalid card, refuses plain clients) (HTTP {status} with browser UA): {url}")
+    for e in errors: print(f"  error: {e}")
+    for w in warnings: print(f"  warning: {w}")
+    return 1  # gated is never plain-walkable, even when the card is valid
+
+def cmd_check_url(args):
+    url = args.url
+    if not url.endswith("agent-card.json"):
+        url = url.rstrip("/") + "/.well-known/agent-card.json"
+    try:
+        status, data = _fetch(url)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            # The host refuses plain automated clients. Retry ONCE with a
+            # browser user-agent: if a valid card comes back, the card exists
+            # but the signpost is gated — report that, don't call it missing.
+            try:
+                status, data = _fetch(url, headers={"User-Agent": BROWSER_UA})
+            except Exception as e2:
+                audit("check-url", url, False, b"",
+                      [f"plain client HTTP {e.code}; browser-UA retry failed: {e2}"])
+                print(f"SIGNPOST MISSING/UNREACHABLE: {url} (plain client HTTP {e.code}; browser-UA retry: {e2})")
+                return 1
+            return _report_gated(url, status, data)
+        audit("check-url", url, False, b"", [str(e)])
+        print(f"SIGNPOST MISSING/UNREACHABLE: {url} ({e})")
+        return 1
+    except Exception as e:
+        audit("check-url", url, False, b"", [str(e)])
+        print(f"SIGNPOST MISSING/UNREACHABLE: {url} ({e})")
+        return 1
+    return _report_plain(url, status, data)
 
 # --- accountability: hash-chained, tamper-evident action log ----------------
 # An agent claiming to be trustworthy should be able to prove what it did.
@@ -329,6 +382,7 @@ def cmd_acct_export(args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="cardtool", description="A2A agent-card generator/validator/signpost checker")
+    ap.add_argument("--version", action="version", version=f"cardtool {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("generate"); g.add_argument("--out", required=True); g.set_defaults(fn=cmd_generate)
     v = sub.add_parser("validate"); v.add_argument("file"); v.set_defaults(fn=cmd_validate)
