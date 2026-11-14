@@ -1,6 +1,7 @@
-import io, json, sys, tempfile, types, unittest
+import io, json, sys, tempfile, types, unittest, urllib.error
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cardtool
 
@@ -132,6 +133,93 @@ class TestAccountability(unittest.TestCase):
         rc, out = _run(cardtool.cmd_acct_add, log=self.log, action="a2", detail="d2")
         self.assertNotEqual(rc, 0)
         self.assertIn("broken", out)
+
+class _FakeResp:
+    """Minimal urlopen response: context manager with .status and .read()."""
+    def __init__(self, status, body):
+        self.status = status; self._body = body
+    def read(self): return self._body
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+def _http_error(url, code):
+    return urllib.error.HTTPError(url, code, f"HTTP {code}", {}, None)
+
+def _valid_card_bytes():
+    return json.dumps(cardtool.my_card()).encode()
+
+class TestCheckUrl(unittest.TestCase):
+    URL = "https://example.com/.well-known/agent-card.json"
+
+    def _check(self, side_effect):
+        with mock.patch("cardtool.urllib.request.urlopen") as m:
+            m.side_effect = side_effect
+            rc, out = _run(cardtool.cmd_check_url, url="https://example.com")
+            return rc, out, m
+
+    def _ua_of(self, mocked, call_index):
+        req = mocked.call_args_list[call_index][0][0]
+        return req.get_header("User-agent")
+
+    def test_plain_valid_unchanged(self):
+        rc, out, m = self._check([_FakeResp(200, _valid_card_bytes())])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("SIGNPOST VALID (HTTP 200)", out)
+        self.assertEqual(m.call_count, 1)  # no retry on a plain success
+
+    def test_plain_404_missing_unchanged(self):
+        rc, out, m = self._check([_http_error(self.URL, 404)])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("SIGNPOST MISSING/UNREACHABLE", out)
+        self.assertEqual(m.call_count, 1)  # no retry for non-401/403
+
+    def test_plain_500_no_retry(self):
+        rc, out, m = self._check([_http_error(self.URL, 500)])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("SIGNPOST MISSING/UNREACHABLE", out)
+        self.assertEqual(m.call_count, 1)
+
+    def test_gated_403_retry_returns_valid_card(self):
+        rc, out, m = self._check([_http_error(self.URL, 403),
+                                  _FakeResp(200, _valid_card_bytes())])
+        self.assertEqual(m.call_count, 2)
+        self.assertIsNone(self._ua_of(m, 0))  # first fetch: plain client
+        self.assertIn("Mozilla/5.0", self._ua_of(m, 1))  # retry: browser UA
+        self.assertIn("SIGNPOST GATED (valid card, refuses plain clients)", out)
+        self.assertNotIn("SIGNPOST VALID", out)
+        self.assertNotIn("MISSING", out)
+        self.assertEqual(rc, 1, out)  # gated is not walkable by a plain client
+
+    def test_gated_401_retry_returns_valid_card(self):
+        rc, out, m = self._check([_http_error(self.URL, 401),
+                                  _FakeResp(200, _valid_card_bytes())])
+        self.assertEqual(m.call_count, 2)
+        self.assertIn("SIGNPOST GATED (valid card, refuses plain clients)", out)
+        self.assertEqual(rc, 1, out)
+
+    def test_gated_retry_still_refused_is_missing(self):
+        rc, out, m = self._check([_http_error(self.URL, 403),
+                                  _http_error(self.URL, 403)])
+        self.assertEqual(m.call_count, 2)
+        self.assertIn("SIGNPOST MISSING/UNREACHABLE", out)
+        self.assertNotIn("GATED", out)
+        self.assertEqual(rc, 1, out)
+
+    def test_gated_retry_invalid_card(self):
+        bad = cardtool.my_card(); del bad["url"]
+        rc, out, m = self._check([_http_error(self.URL, 403),
+                                  _FakeResp(200, json.dumps(bad).encode())])
+        self.assertEqual(m.call_count, 2)
+        self.assertIn("SIGNPOST GATED (invalid card, refuses plain clients)", out)
+        self.assertIn("missing/empty required field: url", out)
+        self.assertEqual(rc, 1, out)
+
+    def test_gated_retry_non_json(self):
+        rc, out, m = self._check([_http_error(self.URL, 403),
+                                  _FakeResp(200, b"<html>not a card</html>")])
+        self.assertEqual(m.call_count, 2)
+        self.assertIn("SIGNPOST GATED (non-JSON response, refuses plain clients)", out)
+        self.assertEqual(rc, 1, out)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
