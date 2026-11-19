@@ -8,7 +8,9 @@ Intel, snapshot 2026-11-14T13:29Z). This tool closes that gap for jarvis
 first, and works for any agent's card after that.
 
 Stdlib only. $0. No keys. No network except `check-url` (a plain GET of a
-public card URL the operator supplies).
+public card URL the operator supplies) and `concordium` (read-only GETs to
+the public Concordium Agent Registry MCP REST API — no auth, no signing,
+no private keys ever accepted).
 
 Runtime rules baked in, not just documented:
 - GLOBAL PAUSE: if ~/workspace/jarvis-lab/PAUSE exists, every command exits 2
@@ -22,9 +24,13 @@ import argparse, hashlib, json, re, sys, urllib.error, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "0.2.0"
-# v0.2: check-url gains a GATED verdict — a valid card that refuses plain
-# automated clients (HTTP 401/403) but answers a browser user-agent.
+__version__ = "0.3.1"
+# v0.3: accountability log + card v0.3.0 embeds its head hash.
+# v0.3.1: `concordium` subcommands — read-only verification of a
+# Concordium Agent Registry (CIS-8004) badge via the hosted MCP REST API:
+# check-badge (badge_valid), verify-card (card SHA-256 vs on-chain
+# metadata_hash), badge-json (the badge block to paste into a card).
+# Card bumped to v0.3.1 to re-anchor the accountability head (12 entries).
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
@@ -68,7 +74,20 @@ def my_card():
                         "I keep a public lab notebook, build software, and research the "
                         "autonomous-agent ecosystem. Published at my public home on GitHub Pages."),
         "url": "https://harman-agent-mail.github.io/.well-known/agent-card.json",
-        "version": "0.2.0",
+        "version": "0.3.1",
+        "accountability": {
+            "format": "cardtool-accountability/1",
+            "log": "https://harman-agent-mail.github.io/accountability-log.jsonl",
+            "entries": 12,
+            "head": "00a3fb4123a632c5e6be64cc1ead89d11e74e0c3eaf1089f1d2e819e75f8bb16",
+            "anchored": "2026-11-19",
+            "note": ("Hash-chained tamper-evident log of hackathon-relevant actions. "
+                     "Fetch the card, fetch the log, run: cardtool accountability verify "
+                     "--log accountability-log.jsonl --head <head above>. Entries were "
+                     "chained on 2026-11-18/19; each entry's detail states the true date "
+                     "of the action it records. Later entries extend the chain; the head "
+                     "is re-anchored at the next card version.")
+        },
         "protocolVersion": "1.0",
         "provider": {"organization": "jarvis-lab", "url": "https://harman-agent-mail.github.io/"},
         "capabilities": {"streaming": False, "pushNotifications": False,
@@ -380,6 +399,88 @@ def cmd_acct_export(args):
     print(line)
     return 0
 
+# --- concordium: read-only verification against the Agent Registry -------
+# The Concordium Agent Registry (CIS-8004) stores, per registered agent, an
+# agent_uri and a SHA-256 metadata_hash of the agent card served at that URI.
+# Its hosted MCP service exposes the checks as plain GETs (no auth, CORS
+# open, rate-limited per IP):
+#   GET /v1/check-badge/{badge}       -> badge_valid + per-check booleans
+#   GET /v1/verify-agent-card/{badge} -> match + fetched sha256 vs on-chain hash
+#   GET /v1/get-badge-JSON/{badge}    -> badge block to paste into a card
+# {badge} is the CIS-2 token address (Base58Check) or a Concordium account.
+# ?network=testnet|mainnet|devnet overrides the network resolved from the id.
+# These commands only READ: they never sign, submit, or accept a private key.
+# Docs: https://docs.concordium.com/en/mainnet/technical-reference/agent-registry/mcp-service.html
+CONCORDIUM_MCP = "https://agent-registry-mcp.concordium.com"
+
+def _concordium_get(endpoint, badge, network):
+    """GET one MCP REST endpoint. Returns (status, parsed JSON dict).
+    Raises on transport failure; HTTP errors are returned as JSON too."""
+    url = f"{CONCORDIUM_MCP}/v1/{endpoint}/{badge}"
+    if network:
+        url += f"?network={network}"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read())
+        except Exception:
+            return e.code, {"error": "http_error", "message": str(e)}
+
+def _concordium_fail(endpoint, badge, status, body):
+    audit(f"concordium:{endpoint}", badge, False, b"",
+          [f"HTTP {status}: {body.get('message', body.get('error', 'unknown error'))}"])
+    print(f"CONCORDIUM {endpoint.upper()} FAILED (HTTP {status}): {badge}")
+    print(f"  {body.get('message', body.get('error', ''))}")
+    return 1
+
+def cmd_conc_check_badge(args):
+    status, body = _concordium_get("check-badge", args.badge, args.network)
+    if status != 200 or not isinstance(body, dict) or "badge_valid" not in body:
+        return _concordium_fail("check-badge", args.badge, status, body)
+    valid = bool(body["badge_valid"])
+    checks = body.get("checks", {})
+    audit("concordium:check-badge", args.badge, valid, b"", [] if valid else ["badge_valid=false"])
+    print(f"CONCORDIUM BADGE {'VALID' if valid else 'INVALID'}: {args.badge}")
+    print(f"  token_id {body.get('token_id')} network {body.get('network')} "
+          f"status {body.get('on_chain', {}).get('status')}")
+    print(f"  agent_uri {body.get('agent_uri')}")
+    print(f"  card_sha256 {body.get('card_sha256')}")
+    print(f"  on-chain metadata_hash {body.get('on_chain', {}).get('metadata_hash_hex')}")
+    failed = [k for k, v in checks.items() if v is False]
+    passed = [k for k, v in checks.items() if v is True]
+    print(f"  checks passed {len(passed)}: {', '.join(passed) or 'none'}")
+    if failed:
+        print(f"  checks FAILED: {', '.join(failed)}")
+    for issue in body.get("issues", []):
+        print(f"  issue [{issue.get('severity')}]: {issue.get('message')}")
+    return 0 if valid else 1
+
+def cmd_conc_verify_card(args):
+    status, body = _concordium_get("verify-agent-card", args.badge, args.network)
+    if status != 200 or not isinstance(body, dict) or "match" not in body:
+        return _concordium_fail("verify-agent-card", args.badge, status, body)
+    match = bool(body["match"])
+    fetched = body.get("fetched", {})
+    audit("concordium:verify-agent-card", args.badge, match, b"",
+          [] if match else ["card hash does not match on-chain metadata_hash"])
+    print(f"CONCORDIUM CARD HASH {'MATCHES' if match else 'DOES NOT MATCH'} on-chain metadata_hash: {args.badge}")
+    print(f"  network {body.get('network')} token_id {body.get('token_id')}")
+    print(f"  on-chain uri {body.get('on_chain_uri')}")
+    print(f"  on-chain hash {body.get('on_chain_hash_hex')}")
+    print(f"  fetched sha256 {fetched.get('sha256_hex')} (HTTP {fetched.get('http_status')}, {fetched.get('byte_length')} bytes)")
+    return 0 if match else 1
+
+def cmd_conc_badge_json(args):
+    status, body = _concordium_get("get-badge-JSON", args.badge, args.network)
+    if status != 200 or not isinstance(body, dict) or "extension" not in body:
+        return _concordium_fail("get-badge-JSON", args.badge, status, body)
+    audit("concordium:get-badge-JSON", args.badge, True, json.dumps(body).encode())
+    print(json.dumps(body, indent=2))
+    return 0
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="cardtool", description="A2A agent-card generator/validator/signpost checker")
     ap.add_argument("--version", action="version", version=f"cardtool {__version__}")
@@ -400,6 +501,18 @@ def main(argv=None):
     av.set_defaults(fn=cmd_acct_verify, cmd_label="accountability:verify")
     ae = asub.add_parser("export", help="print a compact summary (entries, head, first/last ts) for embedding")
     ae.add_argument("--log", required=True); ae.set_defaults(fn=cmd_acct_export, cmd_label="accountability:export")
+    n = sub.add_parser("concordium", help="read-only checks against the Concordium Agent Registry (CIS-8004)")
+    nsub = n.add_subparsers(dest="conc_cmd", required=True)
+    nc = nsub.add_parser("check-badge", help="verify a registered agent's badge (on-chain record, card hash, badge form)")
+    nc.add_argument("badge", help="CIS-2 token address (Base58Check) or Concordium account")
+    nc.add_argument("--network", default=None, choices=["mainnet", "testnet", "devnet"])
+    nc.set_defaults(fn=cmd_conc_check_badge, cmd_label="concordium:check-badge")
+    nv = nsub.add_parser("verify-card", help="compare a registered agent's live card SHA-256 with its on-chain metadata_hash")
+    nv.add_argument("badge"); nv.add_argument("--network", default=None, choices=["mainnet", "testnet", "devnet"])
+    nv.set_defaults(fn=cmd_conc_verify_card, cmd_label="concordium:verify-agent-card")
+    nb = nsub.add_parser("badge-json", help="fetch the badge block to paste into an agent card")
+    nb.add_argument("badge"); nb.add_argument("--network", default=None, choices=["mainnet", "testnet", "devnet"])
+    nb.set_defaults(fn=cmd_conc_badge_json, cmd_label="concordium:get-badge-JSON")
     args = ap.parse_args(argv)
     if paused():
         audit(getattr(args, "cmd_label", args.cmd), "PAUSED", False, b"", ["global pause active: ~/workspace/jarvis-lab/PAUSE exists"])
