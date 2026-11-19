@@ -223,3 +223,102 @@ class TestCheckUrl(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestConcordium(unittest.TestCase):
+    """Read-only checks against the hosted Agent Registry MCP REST API.
+    All network calls are mocked; the live endpoint shape was verified by
+    hand on 2026-11-19 against badge Mf22soLh1NuZYFgBK8iSs (badge_valid=true,
+    verify-agent-card match=true)."""
+    BADGE = "Mf22soLh1NuZYFgBK8iSs"
+
+    def _badge_body(self, valid=True):
+        return {
+            "token_id": 484, "token_address": self.BADGE, "network": "mainnet",
+            "agent_uri": "https://example.com/.well-known/agent-card.json",
+            "http_status": 200,
+            "card_sha256": "a" * 64,
+            "on_chain": {"owner_account": "4DDx", "status": "Active",
+                         "agent_uri": "https://example.com/.well-known/agent-card.json",
+                         "metadata_hash_hex": "a" * 64},
+            "checks": {"on_chain_agent_found": True, "status_active": True,
+                       "has_agent_uri": True, "card_fetched": True,
+                       "hash_matches_on_chain": valid, "badge_present": True},
+            "badge_valid": valid,
+            "issues": [] if valid else [{"severity": "error", "field": "hash",
+                                         "message": "card hash mismatch"}],
+        }
+
+    def _verify_body(self, match=True):
+        return {"network": "mainnet", "token_id": "484",
+                "on_chain_uri": "https://example.com/.well-known/agent-card.json",
+                "on_chain_hash_hex": "a" * 64,
+                "fetched": {"http_status": 200, "byte_length": 1234,
+                            "sha256_hex": "a" * 64 if match else "b" * 64},
+                "match": match}
+
+    def _run_conc(self, fn, body, status=200):
+        with mock.patch("cardtool.urllib.request.urlopen") as m:
+            m.return_value = _FakeResp(status, json.dumps(body).encode())
+            rc, out = _run(fn, badge=self.BADGE, network=None)
+            return rc, out, m
+
+    def test_check_badge_valid(self):
+        rc, out, m = self._run_conc(cardtool.cmd_conc_check_badge, self._badge_body(True))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("CONCORDIUM BADGE VALID", out)
+        self.assertIn("hash_matches_on_chain", out)
+        self.assertEqual(m.call_count, 1)
+        url = m.call_args_list[0][0][0].full_url
+        self.assertIn("/v1/check-badge/" + self.BADGE, url)
+
+    def test_check_badge_invalid(self):
+        rc, out, _ = self._run_conc(cardtool.cmd_conc_check_badge, self._badge_body(False))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("CONCORDIUM BADGE INVALID", out)
+        self.assertIn("checks FAILED: hash_matches_on_chain", out)
+
+    def test_check_badge_bad_id_is_failure_not_crash(self):
+        with mock.patch("cardtool.urllib.request.urlopen") as m:
+            m.side_effect = [_http_error("x", 400)]
+            rc, out = _run(cardtool.cmd_conc_check_badge, badge="not-a-badge", network=None)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAILED (HTTP 400)", out)
+
+    def test_verify_card_match(self):
+        rc, out, _ = self._run_conc(cardtool.cmd_conc_verify_card, self._verify_body(True))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("MATCHES", out)
+
+    def test_verify_card_mismatch(self):
+        rc, out, _ = self._run_conc(cardtool.cmd_conc_verify_card, self._verify_body(False))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("DOES NOT MATCH", out)
+
+    def test_badge_json_prints_extension(self):
+        body = {"network": "mainnet", "token_address": self.BADGE, "token_id": 484,
+                "status": "Active",
+                "extension": {"uri": "https://docs.concordium.com/a2a-extensions/concordium-badge/v1",
+                              "params": {"tokenAddress": "ccd:9dd9:cis-2:" + self.BADGE}},
+                "registrations_entry": {"agentId": 484}}
+        rc, out, _ = self._run_conc(cardtool.cmd_conc_badge_json, body)
+        self.assertEqual(rc, 0, out)
+        self.assertIn(self.BADGE, out)
+        self.assertIn("concordium-badge/v1", out)
+
+    def test_my_card_version_and_head_anchor(self):
+        c = cardtool.my_card()
+        self.assertEqual(c["version"], "0.3.1")
+        acct = c["accountability"]
+        self.assertEqual(acct["entries"], 12)
+        self.assertEqual(acct["head"], "00a3fb4123a632c5e6be64cc1ead89d11e74e0c3eaf1089f1d2e819e75f8bb16")
+        self.assertEqual(acct["anchored"], "2026-11-19")
+
+    def test_generate_reproduces_published_card(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = str(Path(d) / "agent-card.json")
+            rc, _ = _run(cardtool.cmd_generate, out=out)
+            self.assertEqual(rc, 0)
+            published = Path(__file__).resolve().parents[1] / "output" / "agent-card.json"
+            self.assertEqual(Path(out).read_bytes(), published.read_bytes(),
+                             "generate must reproduce the published card byte-for-byte")
