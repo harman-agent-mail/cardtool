@@ -306,13 +306,65 @@ class TestConcordium(unittest.TestCase):
         self.assertIn(self.BADGE, out)
         self.assertIn("concordium-badge/v1", out)
 
+    # --- contract-info ---
+    _CONFIG_JS = ('window.AGENT_REGISTRY_UI_CONFIG = { networks: {'
+                  ' testnet: { agentRegistry: { contractName: "CIS-8004", contractIndex: "12802", contractSubindex: "0" },'
+                  ' cisx: { contractName: "CIS-8", contractIndex: "12801", contractSubindex: "0" } },'
+                  ' mainnet: { agentRegistry: { contractName: "CIS-8004", contractIndex: "10082", contractSubindex: "0" },'
+                  ' cisx: { contractName: "CIS-8", contractIndex: "10081", contractSubindex: "0" } } } };')
+
+    def _check_badge_body(self, cis8004="12802,0", cis8="12801,0"):
+        body = self._badge_body(True)
+        body["token_id"] = 0
+        body["token_address"] = "JyP9TtQC3HCNrTYR3sc2T"
+        body["network"] = "testnet"
+        body["expected"] = {"contracts": {"cis8004": cis8004, "cis8": cis8}}
+        return body
+
+    def _run_contract_info(self, config_text, badge_body=None, status=200):
+        responses = [_FakeResp(200, config_text.encode())]
+        if badge_body is not None:
+            responses.append(_FakeResp(status, json.dumps(badge_body).encode()))
+        with mock.patch("cardtool.urllib.request.urlopen") as m:
+            m.side_effect = responses
+            rc, out = _run(cardtool.cmd_conc_contract_info, network="testnet")
+            return rc, out, m
+
+    def test_token_badge_reproduces_known_badges(self):
+        # Mainnet badges verified live 2026-11-19 (token 484) and from
+        # gregers.dev (token 40); testnet token 0 verified live 2026-11-20
+        # against the indexer record + the MCP expected.contracts field.
+        self.assertEqual(cardtool.concordium_token_badge(10082, 0, 484), "Mf22soLh1NuZYFgBK8iSs")
+        self.assertEqual(cardtool.concordium_token_badge(10082, 0, 40), "Mf22pFZuWLFzMWDPP4qzj")
+        self.assertEqual(cardtool.concordium_token_badge(12802, 0, 0), "JyP9TtQC3HCNrTYR3sc2T")
+
+    def test_contract_info_testnet_confirmed(self):
+        rc, out, m = self._run_contract_info(self._CONFIG_JS, self._check_badge_body())
+        self.assertEqual(rc, 0, out)
+        self.assertIn("CIS-8004 12802,0", out)
+        self.assertIn("CIS-8 12801,0", out)
+        self.assertIn("CONFIRMED", out)
+        self.assertEqual(m.call_count, 2)
+        self.assertIn("config.js", m.call_args_list[0][0][0].full_url)
+        self.assertIn("JyP9TtQC3HCNrTYR3sc2T", m.call_args_list[1][0][0].full_url)
+
+    def test_contract_info_mismatch_fails(self):
+        rc, out, _ = self._run_contract_info(self._CONFIG_JS, self._check_badge_body("99999,0", "12801,0"))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("MISMATCH", out)
+
+    def test_contract_info_bad_config_fails(self):
+        rc, out, _ = self._run_contract_info("window.AGENT_REGISTRY_UI_CONFIG = {};")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAILED", out)
+
     def test_my_card_version_and_head_anchor(self):
         c = cardtool.my_card()
-        self.assertEqual(c["version"], "0.3.1")
+        self.assertEqual(c["version"], "0.3.2")
         acct = c["accountability"]
-        self.assertEqual(acct["entries"], 12)
-        self.assertEqual(acct["head"], "00a3fb4123a632c5e6be64cc1ead89d11e74e0c3eaf1089f1d2e819e75f8bb16")
-        self.assertEqual(acct["anchored"], "2026-11-19")
+        self.assertEqual(acct["entries"], 13)
+        self.assertEqual(acct["head"], "1303d825d53bea2da69d5e459dc9b0c16d601b8929a1cf423a85441068ae8611")
+        self.assertEqual(acct["anchored"], "2026-11-20")
 
     def test_generate_reproduces_published_card(self):
         with tempfile.TemporaryDirectory() as d:
