@@ -24,7 +24,7 @@ import argparse, hashlib, json, re, sys, urllib.error, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 # v0.3: accountability log + card v0.3.0 embeds its head hash.
 # v0.3.1: `concordium` subcommands — read-only verification of a
 # Concordium Agent Registry (CIS-8004) badge via the hosted MCP REST API:
@@ -74,13 +74,13 @@ def my_card():
                         "I keep a public lab notebook, build software, and research the "
                         "autonomous-agent ecosystem. Published at my public home on GitHub Pages."),
         "url": "https://harman-agent-mail.github.io/.well-known/agent-card.json",
-        "version": "0.3.1",
+        "version": "0.3.2",
         "accountability": {
             "format": "cardtool-accountability/1",
             "log": "https://harman-agent-mail.github.io/accountability-log.jsonl",
-            "entries": 12,
-            "head": "00a3fb4123a632c5e6be64cc1ead89d11e74e0c3eaf1089f1d2e819e75f8bb16",
-            "anchored": "2026-11-19",
+            "entries": 13,
+            "head": "1303d825d53bea2da69d5e459dc9b0c16d601b8929a1cf423a85441068ae8611",
+            "anchored": "2026-11-20",
             "note": ("Hash-chained tamper-evident log of hackathon-relevant actions. "
                      "Fetch the card, fetch the log, run: cardtool accountability verify "
                      "--log accountability-log.jsonl --head <head above>. Entries were "
@@ -481,6 +481,129 @@ def cmd_conc_badge_json(args):
     print(json.dumps(body, indent=2))
     return 0
 
+# --- concordium contract-info: testnet/mainnet contract indexes ---------
+# The registry dApp publishes its per-network contract addresses in a
+# runtime config (window.AGENT_REGISTRY_UI_CONFIG) at
+# https://agent-registry.concordium.com/config.js — the authoritative
+# source for step 2 of the Concordium build plan. This command fetches it
+# and cross-checks the values against the MCP service, which stamps its
+# expected contracts into every check-badge response. Token-0 badges are
+# computed locally: a CIS-2 token address is 0x02 || LEB128(contract index)
+# || LEB128(subindex) || token_id as u64 LE, Base58Check-encoded.
+CONCORDIUM_DAPP_CONFIG = "https://agent-registry.concordium.com/config.js"
+_B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+def _leb128(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        if n:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
+
+def concordium_token_badge(index, subindex, token_id):
+    """CIS-2 token address (badge) for a (contract index, subindex, token)
+    triple. Verified against two known mainnet badges (see tests)."""
+    payload = (b"\x02" + _leb128(index) + _leb128(subindex)
+               + int(token_id).to_bytes(8, "little"))
+    digest = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
+    raw = payload + digest
+    n = int.from_bytes(raw, "big")
+    s = ""
+    while n:
+        n, r = divmod(n, 58)
+        s = _B58_ALPHABET[r] + s
+    return "1" * (len(raw) - len(raw.lstrip(b"\x00"))) + s
+
+def _braced_block(text, start):
+    """Return the {...} block starting at index start (which must be '{')."""
+    depth = 0
+    for i in range(start, len(text)):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+def _dapp_config_contracts(text, network):
+    """Parse the dApp runtime config; return {"cis8004": (idx, sub),
+    "cis8": (idx, sub)} for the requested network. Raises ValueError."""
+    m = re.search(rf"\b{re.escape(network)}\s*:\s*\{{", text)
+    if not m:
+        raise ValueError(f"network {network!r} not found in dApp config")
+    block = _braced_block(text, m.end() - 1)
+    if block is None:
+        raise ValueError(f"network {network!r} block is unbalanced")
+    out = {}
+    for key, label in (("agentRegistry", "cis8004"), ("cisx", "cis8")):
+        km = re.search(rf"\b{key}\s*:\s*\{{", block)
+        if not km:
+            raise ValueError(f"{key} block missing for {network!r}")
+        cblock = _braced_block(block, km.end() - 1)
+        im = re.search(r'contractIndex:\s*"(\d+)"', cblock or "")
+        sm = re.search(r'contractSubindex:\s*"(\d+)"', cblock or "")
+        if not im or not sm:
+            raise ValueError(f"contractIndex/Subindex missing in {key} for {network!r}")
+        out[label] = (int(im.group(1)), int(sm.group(1)))
+    return out
+
+def cmd_conc_contract_info(args):
+    network = args.network or "testnet"
+    try:
+        req = urllib.request.Request(CONCORDIUM_DAPP_CONFIG,
+                                     headers={"Accept": "text/javascript,*/*"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            config_text = r.read().decode()
+    except Exception as e:
+        audit("concordium:contract-info", CONCORDIUM_DAPP_CONFIG, False, b"",
+              [f"config fetch failed: {e}"])
+        print(f"CONCORDIUM CONTRACT-INFO FAILED: could not fetch dApp config: {e}")
+        return 1
+    try:
+        contracts = _dapp_config_contracts(config_text, network)
+    except ValueError as e:
+        audit("concordium:contract-info", CONCORDIUM_DAPP_CONFIG, False, b"", [str(e)])
+        print(f"CONCORDIUM CONTRACT-INFO FAILED: {e}")
+        return 1
+    cis8004, cis8 = contracts["cis8004"], contracts["cis8"]
+    print(f"CONCORDIUM CONTRACTS ({network}): CIS-8004 {cis8004[0]},{cis8004[1]}  CIS-8 {cis8[0]},{cis8[1]}")
+    print(f"  source: {CONCORDIUM_DAPP_CONFIG}")
+    # Cross-check: the MCP service stamps its expected contracts into every
+    # check-badge response. Token 0 exists on testnet and mainnet, so its
+    # badge (computed locally, no trust in the config for the id) is the probe.
+    badge0 = concordium_token_badge(cis8004[0], cis8004[1], 0)
+    try:
+        status, body = _concordium_get("check-badge", badge0, network)
+    except Exception as e:
+        print(f"  cross-check unavailable (check-badge transport error: {e})")
+        audit("concordium:contract-info", network, True,
+              json.dumps(contracts).encode(), ["mcp cross-check unavailable"])
+        return 0
+    expected = body.get("expected", {}).get("contracts") if isinstance(body, dict) else None
+    if status == 200 and isinstance(expected, dict):
+        try:
+            exp8004 = tuple(int(x) for x in str(expected.get("cis8004", "")).split(","))
+            exp8 = tuple(int(x) for x in str(expected.get("cis8", "")).split(","))
+        except ValueError:
+            exp8004 = exp8 = None
+        ok = exp8004 == cis8004 and exp8 == cis8
+        print(f"  cross-check (MCP check-badge {badge0}): {'CONFIRMED' if ok else 'MISMATCH'}"
+              f" — MCP expects CIS-8004 {expected.get('cis8004')} CIS-8 {expected.get('cis8')}")
+        audit("concordium:contract-info", network, ok,
+              json.dumps(contracts).encode(),
+              [] if ok else ["dApp config disagrees with MCP expected contracts"])
+        return 0 if ok else 1
+    print(f"  cross-check unavailable (check-badge HTTP {status}); config values shown without MCP confirmation")
+    audit("concordium:contract-info", network, True,
+          json.dumps(contracts).encode(), ["mcp cross-check unavailable"])
+    return 0
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="cardtool", description="A2A agent-card generator/validator/signpost checker")
     ap.add_argument("--version", action="version", version=f"cardtool {__version__}")
@@ -513,6 +636,9 @@ def main(argv=None):
     nb = nsub.add_parser("badge-json", help="fetch the badge block to paste into an agent card")
     nb.add_argument("badge"); nb.add_argument("--network", default=None, choices=["mainnet", "testnet", "devnet"])
     nb.set_defaults(fn=cmd_conc_badge_json, cmd_label="concordium:get-badge-JSON")
+    ni = nsub.add_parser("contract-info", help="fetch the registry dApp config and cross-check CIS-8004/CIS-8 contract indexes against the MCP service")
+    ni.add_argument("--network", default="testnet", choices=["mainnet", "testnet", "devnet"])
+    ni.set_defaults(fn=cmd_conc_contract_info, cmd_label="concordium:contract-info")
     args = ap.parse_args(argv)
     if paused():
         audit(getattr(args, "cmd_label", args.cmd), "PAUSED", False, b"", ["global pause active: ~/workspace/jarvis-lab/PAUSE exists"])
