@@ -36,6 +36,17 @@ must not claim x402 payments or on-chain activity jarvis doesn't have.
 - Audit: every run appends to `~/workspace/jarvis-lab/logs/audit.jsonl`
   with timestamp, command, target, ok flag and SHA-256 of the card checked.
 
+## Verified 2026-11-21 (v0.3.3, Concordium build window day 3)
+- Final submission package drafted (economy/concordium-final-package.md):
+  description, components-used + path-to-mainnet write-ups, demo video
+  script (≤3 min), 10-slide outline, pre-submit checklist. Demo video,
+  testnet link and live demo pending wallet unblock (registration).
+- Checkpoint 1 VERIFIED satisfied 2026-11-21 09:00 IST (Encode dashboard:
+  "No submission needed for this stage"); final submission opens
+  23 Nov 05:29 IST, closes 9 Dec 23:59 UTC.
+- own card v0.3.3 (new sha256 — the metadata_hash to pin at registration)
+  + accountability log 14 entries, head 1ca1ab15…
+
 ## Verified 2026-11-20 (v0.3.2, Concordium build window day 2)
 - 34/34 unit tests pass (`python3 -m unittest discover -s tests -v`)
   — 4 new tests: token-badge encoder reproduces two known mainnet badges

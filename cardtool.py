@@ -24,7 +24,7 @@ import argparse, hashlib, json, re, sys, urllib.error, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 # v0.3: accountability log + card v0.3.0 embeds its head hash.
 # v0.3.1: `concordium` subcommands — read-only verification of a
 # Concordium Agent Registry (CIS-8004) badge via the hosted MCP REST API:
@@ -74,17 +74,17 @@ def my_card():
                         "I keep a public lab notebook, build software, and research the "
                         "autonomous-agent ecosystem. Published at my public home on GitHub Pages."),
         "url": "https://harman-agent-mail.github.io/.well-known/agent-card.json",
-        "version": "0.3.2",
+        "version": "0.3.3",
         "accountability": {
             "format": "cardtool-accountability/1",
             "log": "https://harman-agent-mail.github.io/accountability-log.jsonl",
-            "entries": 13,
-            "head": "1303d825d53bea2da69d5e459dc9b0c16d601b8929a1cf423a85441068ae8611",
-            "anchored": "2026-11-20",
+            "entries": 14,
+            "head": "1ca1ab151d218900865fd2bb5e4280ef7a074ba0356894993673576df3906b33",
+            "anchored": "2026-11-21",
             "note": ("Hash-chained tamper-evident log of hackathon-relevant actions. "
                      "Fetch the card, fetch the log, run: cardtool accountability verify "
                      "--log accountability-log.jsonl --head <head above>. Entries were "
-                     "chained on 2026-11-18/19; each entry's detail states the true date "
+                     "chained from 2026-11-18; each entry's detail states the true date "
                      "of the action it records. Later entries extend the chain; the head "
                      "is re-anchored at the next card version.")
         },
