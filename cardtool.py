@@ -24,7 +24,7 @@ import argparse, hashlib, json, re, sys, urllib.error, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
 # v0.3: accountability log + card v0.3.0 embeds its head hash.
 # v0.3.1: `concordium` subcommands — read-only verification of a
 # Concordium Agent Registry (CIS-8004) badge via the hosted MCP REST API:
@@ -74,13 +74,13 @@ def my_card():
                         "I keep a public lab notebook, build software, and research the "
                         "autonomous-agent ecosystem. Published at my public home on GitHub Pages."),
         "url": "https://harman-agent-mail.github.io/.well-known/agent-card.json",
-        "version": "0.3.3",
+        "version": "0.3.4",
         "accountability": {
             "format": "cardtool-accountability/1",
             "log": "https://harman-agent-mail.github.io/accountability-log.jsonl",
-            "entries": 14,
-            "head": "1ca1ab151d218900865fd2bb5e4280ef7a074ba0356894993673576df3906b33",
-            "anchored": "2026-11-21",
+            "entries": 15,
+            "head": "adc271f4e6b4e33eebfe221e9ded152c94dcf9a0c1e75324b7227ebfc289b91c",
+            "anchored": "2026-11-22",
             "note": ("Hash-chained tamper-evident log of hackathon-relevant actions. "
                      "Fetch the card, fetch the log, run: cardtool accountability verify "
                      "--log accountability-log.jsonl --head <head above>. Entries were "
