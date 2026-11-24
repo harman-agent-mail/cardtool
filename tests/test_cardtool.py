@@ -360,11 +360,11 @@ class TestConcordium(unittest.TestCase):
 
     def test_my_card_version_and_head_anchor(self):
         c = cardtool.my_card()
-        self.assertEqual(c["version"], "0.3.5")
+        self.assertEqual(c["version"], "0.3.6")
         acct = c["accountability"]
-        self.assertEqual(acct["entries"], 16)
-        self.assertEqual(acct["head"], "6a1a141f2c9fe41b6a5d49969e33f428fe63479346553ec08ec4cd2881e83590")
-        self.assertEqual(acct["anchored"], "2026-11-23")
+        self.assertEqual(acct["entries"], 17)
+        self.assertEqual(acct["head"], "f1e93ae0f29fb19e2722baf384b3ca85c254299d99541a45a5b4c7ee5151d53e")
+        self.assertEqual(acct["anchored"], "2026-11-24")
 
     def test_generate_reproduces_published_card(self):
         with tempfile.TemporaryDirectory() as d:
